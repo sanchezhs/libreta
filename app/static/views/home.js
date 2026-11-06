@@ -1,5 +1,5 @@
 import * as nav from "../nav.js";
-import { api, fmtDate, fmtKg, fmtSet, h, sheet, sparkline, toast, todayISO } from "../lib.js";
+import { api, fmtDate, fmtKg, fmtSet, dropDraft, getPlan, h, isQueued, openDrafts, putDraft, queueStart, sheet, sparkline, toast, todayISO, uuid } from "../lib.js";
 
 const LETTERS = ["L", "M", "X", "J", "V", "S", "D"];
 const STATUS_TEXT = {
@@ -7,15 +7,38 @@ const STATUS_TEXT = {
   planned: "Programado", rest: "Descanso", free: "Libre",
 };
 
-async function start(dayId) {
-  const { id } = await api("/api/workouts", { method: "POST", body: { date: todayISO(), routine_day_id: dayId } });
-  location.hash = `#/w/${id}`;
+// The workout is created on the phone first (id, exercises, last time, deload
+// suggestion from the saved plan) and sent to the server through the save queue,
+// so starting one works with no signal.
+export async function start(dayId) {
+  const plan = await getPlan();
+  const day = plan?.days.find((d) => d.id === dayId);
+  const wid = uuid();
+  const date = todayISO();
+  putDraft({
+    id: wid, date, routine_day_id: dayId ?? null, name: day?.name || "Entreno libre",
+    is_deload: !!plan?.is_deload, status: "open", draft: true,
+    exercises: (day?.exercises || []).map((e) => ({ ...e, sets: [] })),
+  });
+  queueStart(wid, { date, routine_day_id: dayId ?? null });
+  location.hash = `#/w/${wid}`;
 }
 
 function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
 export async function renderHome() {
   const data = await api("/api/home", { today: true });
+  getPlan();  // refresh the copy kept for starting workouts offline
+  // Local state the server (or its saved copy) doesn't know yet.
+  for (const d of openDrafts()) {
+    const serverOpen = data.due.kind === "open" && data.due.workout.id === d.id;
+    if (serverOpen) continue;
+    if (data._offline || isQueued(d.id)) data.due = { kind: "open", workout: { id: d.id, name: d.name } };
+    else dropDraft(d.id);  // online and the server says it's no longer open
+  }
+  if (data.due.kind === "open" && isQueued(`finish:${data.due.workout.id}`)) {
+    data.due = { kind: "done", next: null };
+  }
   const out = [];
 
   out.push(h("div", { class: "row between" },
@@ -91,7 +114,9 @@ function pendingCard(data) {
 function renderHomeAgain() { nav.refresh(); }
 
 async function pickDay() {
-  const { days } = await api("/api/routine");
+  // From the plan kept on the phone, so it works without a connection.
+  const plan = await getPlan();
+  const days = plan?.days || [];
   sheet((close) => [
     h("h2", {}, "¿Qué día vas a hacer?"),
     ...days.map((d) => h("button", { class: "block", onclick: async () => { await close(); start(d.id); } },

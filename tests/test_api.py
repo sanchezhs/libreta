@@ -74,3 +74,45 @@ def test_progress_metrics(client):
     assert s["e1rm"] == round(60 * (1 + 8 / 30), 1)
     assert p["exercises"][1]["sessions"] == []  # Press banca: in routine, no data yet
     assert p["weeks"] == [{"week_start": "2026-11-02", "sets": 2, "workouts": 1, "deload": False}]
+
+
+def test_offline_start_sets_finish_in_one_sync(client):
+    """A whole workout done offline arrives in a single batch, in any order."""
+    day = setup_day(client)
+    fondos = client.get("/api/routine").json()["days"][0]["exercises"][0]["id"]
+    ops = [
+        {"op": "finish", "id": "finish:w1", "ts": 9, "data": {"workout_id": "w1"}},
+        put("s1", "w1", fondos, 2, 8, 60, 0),
+        {"op": "put", "id": "s2", "ts": 3, "data": {"workout_id": "w1", "exercise_id": fondos,
+                                                    "position": 1, "reps": None, "weight_kg": None}},
+        {"op": "start", "id": "w1", "ts": 1, "data": {"date": "2026-11-04", "routine_day_id": day}},
+    ]
+    res = client.post("/api/sync", json={"ops": ops}).json()["results"]
+    assert set(res.values()) == {"ok"}
+    w = client.get("/api/workouts/w1").json()
+    assert w["status"] == "done" and w["name"] == "Torso"
+    assert [(s["reps"], s["weight_kg"]) for s in w["exercises"][0]["sets"]] == [(8, 60)]  # empty row dropped
+    # Re-sending everything (lost response) changes nothing
+    client.post("/api/sync", json={"ops": ops})
+    assert len(client.get("/api/workouts").json()) == 1
+
+
+def test_plan_has_last_session_and_deload_suggestion(client):
+    day = setup_day(client)
+    fondos = client.get("/api/routine").json()["days"][0]["exercises"][0]["id"]
+    client.post("/api/sync", json={"ops": [
+        {"op": "start", "id": "w1", "ts": 1, "data": {"date": "2026-11-04", "routine_day_id": day}},
+        put("a", "w1", fondos, 2, 8, 60, 0), put("b", "w1", fondos, 2, 8, 45, 1)]})
+    p = client.get("/api/plan?today=2026-11-06").json()
+    ex = p["days"][0]["exercises"][0]
+    assert ex["last"]["sets"] == [{"reps": 8, "weight_kg": 60}, {"reps": 8, "weight_kg": 45}]
+    assert ex["suggestion"] is None and not p["is_deload"]
+    client.put("/api/deload/2026-11-09?today=2026-11-09", json={"on": True})
+    p = client.get("/api/plan?today=2026-11-10").json()
+    assert p["is_deload"]
+    assert p["days"][0]["exercises"][0]["suggestion"]["sets"] == [{"reps": 8, "weight_kg": 60}]
+
+
+def test_service_worker_is_versioned(client):
+    r = client.get("/sw.js")
+    assert r.status_code == 200 and "__VERSION__" not in r.text and "/static/app.js" in r.text

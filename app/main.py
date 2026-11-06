@@ -1,10 +1,12 @@
+import hashlib
+import json
 import sqlite3
 import uuid
 from datetime import date, datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -61,6 +63,7 @@ class DayIn(BaseModel):
 class WorkoutIn(BaseModel):
     date: str
     routine_day_id: int | None = None
+    id: str | None = Field(default=None, max_length=64)
 
 
 class WorkoutPatch(BaseModel):
@@ -79,10 +82,19 @@ class SetData(BaseModel):
 
 
 class SyncOp(BaseModel):
-    op: str                      # "put" | "del"
-    id: str
+    op: str                      # "start" | "put" | "del" | "finish"
+    id: str                      # set id; workout id for "start"; "finish:<workout id>"
     ts: int                      # client timestamp in ms
-    data: SetData | None = None
+    data: dict | None = None
+
+
+class StartData(BaseModel):
+    date: str
+    routine_day_id: int | None = None
+
+
+class FinishData(BaseModel):
+    workout_id: str
 
 
 class SyncIn(BaseModel):
@@ -234,25 +246,37 @@ def exercise_history(exercise_id: int, conn=Depends(get_conn)):
 
 # ---------- workouts ----------
 
+def _create_workout(conn, wid: str, day: str, routine_day_id: int | None) -> bool:
+    """Idempotent: creating a workout that already exists is a no-op."""
+    if conn.execute("SELECT 1 FROM workout WHERE id = ?", (wid,)).fetchone():
+        return True
+    d = logic.parse_date(day)
+    name = "Entreno libre"
+    if routine_day_id is not None:
+        row = conn.execute("SELECT name FROM routine_day WHERE id = ?", (routine_day_id,)).fetchone()
+        if not row:
+            routine_day_id = None  # day deleted meanwhile: keep the workout anyway
+        else:
+            name = row["name"]
+    settings = logic.get_settings(conn, date.today())
+    conn.execute(
+        "INSERT INTO workout(id, date, routine_day_id, name, is_deload, status, started_at) "
+        "VALUES (?, ?, ?, ?, ?, 'open', ?)",
+        (wid, d.isoformat(), routine_day_id, name,
+         int(logic.is_deload_week(logic.week_start(d), settings)), now()))
+    # Starting a workout on a day marked as rest un-marks it.
+    conn.execute("DELETE FROM day_override WHERE date = ?", (d.isoformat(),))
+    return True
+
+
 @app.post("/api/workouts")
 def start_workout(body: WorkoutIn, conn=Depends(get_conn)):
-    d = logic.parse_date(body.date)
-    name = "Entreno libre"
-    if body.routine_day_id is not None:
-        row = conn.execute("SELECT name FROM routine_day WHERE id = ?", (body.routine_day_id,)).fetchone()
-        if not row:
-            raise HTTPException(404, "day not found")
-        name = row["name"]
-    settings = logic.get_settings(conn, date.today())
-    wid = str(uuid.uuid4())
+    if body.routine_day_id is not None and not conn.execute(
+            "SELECT 1 FROM routine_day WHERE id = ?", (body.routine_day_id,)).fetchone():
+        raise HTTPException(404, "day not found")
+    wid = body.id or str(uuid.uuid4())
     with tx(conn):
-        conn.execute(
-            "INSERT INTO workout(id, date, routine_day_id, name, is_deload, status, started_at) "
-            "VALUES (?, ?, ?, ?, ?, 'open', ?)",
-            (wid, d.isoformat(), body.routine_day_id, name,
-             int(logic.is_deload_week(logic.week_start(d), settings)), now()))
-        # Starting a workout on a day marked as rest un-marks it.
-        conn.execute("DELETE FROM day_override WHERE date = ?", (d.isoformat(),))
+        _create_workout(conn, wid, body.date, body.routine_day_id)
     return {"id": wid}
 
 
@@ -294,14 +318,32 @@ def get_workout(wid: str, conn=Depends(get_conn)):
 
     for e in exercises:
         e["sets"] = [s for s in sets if s["exercise_id"] == e["id"]]
-        e["last"] = logic.last_session(conn, e["id"], wid, before=w["date"])
-        e["suggestion"] = None
-        if w["is_deload"]:
-            base = logic.last_session(conn, e["id"], wid, before=w["date"], non_deload=True)
-            if base:
-                e["suggestion"] = {"sets": logic.deload_suggestion(base["sets"], settings),
-                                   "rir": settings["deload_rir"], "from_date": base["date"]}
+        e.update(_exercise_context(conn, e["id"], wid, w["date"], bool(w["is_deload"]), settings))
     return {**w, "is_deload": bool(w["is_deload"]), "exercises": exercises}
+
+
+def _exercise_context(conn, ex_id: int, wid: str | None, day: str, is_deload: bool, settings: dict) -> dict:
+    """What the workout screen shows for an exercise: last time, and the deload suggestion."""
+    out = {"last": logic.last_session(conn, ex_id, wid, before=day), "suggestion": None}
+    if is_deload:
+        base = logic.last_session(conn, ex_id, wid, before=day, non_deload=True)
+        if base:
+            out["suggestion"] = {"sets": logic.deload_suggestion(base["sets"], settings),
+                                 "rir": settings["deload_rir"], "from_date": base["date"]}
+    return out
+
+
+@app.get("/api/plan")
+def plan(request: Request, conn=Depends(get_conn)):
+    """Everything needed to start any routine day today without a connection."""
+    today = today_of(request)
+    settings = logic.get_settings(conn, today)
+    is_deload = logic.is_deload_week(logic.week_start(today), settings)
+    days = logic.routine_days(conn)
+    for d in days:
+        for e in d["exercises"]:
+            e.update(_exercise_context(conn, e["id"], None, today.isoformat(), is_deload, settings))
+    return {"date": today.isoformat(), "is_deload": is_deload, "days": days}
 
 
 @app.patch("/api/workouts/{wid}")
@@ -333,7 +375,29 @@ def delete_workout(wid: str, conn=Depends(get_conn)):
 
 # ---------- sets (offline-safe sync) ----------
 
+OP_ORDER = {"start": 0, "put": 1, "del": 1, "finish": 2}
+
+
 def _apply(conn, op: SyncOp) -> str:
+    if op.op == "start":
+        try:
+            d = StartData(**(op.data or {}))
+            logic.parse_date(d.date)
+        except Exception:
+            return "bad"
+        _create_workout(conn, op.id, d.date, d.routine_day_id)
+        return "ok"
+    if op.op == "finish":
+        try:
+            wid = FinishData(**(op.data or {})).workout_id
+        except Exception:
+            return "bad"
+        if not conn.execute("SELECT 1 FROM workout WHERE id = ?", (wid,)).fetchone():
+            return "gone"
+        conn.execute("UPDATE workout SET status = 'done', finished_at = COALESCE(finished_at, ?) WHERE id = ?",
+                     (now(), wid))
+        conn.execute("DELETE FROM set_entry WHERE workout_id = ? AND reps IS NULL", (wid,))
+        return "ok"
     if op.op == "del":
         conn.execute("DELETE FROM set_entry WHERE id = ? AND client_ts <= ?", (op.id, op.ts))
         conn.execute("INSERT INTO set_tombstone(id, client_ts) VALUES (?, ?) "
@@ -342,10 +406,13 @@ def _apply(conn, op: SyncOp) -> str:
         return "ok"
     if op.op != "put" or op.data is None:
         return "bad"
+    try:
+        d = SetData(**op.data)
+    except Exception:
+        return "bad"
     dead = conn.execute("SELECT client_ts FROM set_tombstone WHERE id = ?", (op.id,)).fetchone()
     if dead and dead["client_ts"] >= op.ts:
         return "stale"
-    d = op.data
     if not conn.execute("SELECT 1 FROM workout WHERE id = ?", (d.workout_id,)).fetchone():
         return "gone"  # workout deleted meanwhile: nothing to attach to
     if not conn.execute("SELECT 1 FROM exercise WHERE id = ?", (d.exercise_id,)).fetchone():
@@ -363,7 +430,8 @@ def _apply(conn, op: SyncOp) -> str:
 @app.post("/api/sync")
 def sync(body: SyncIn, conn=Depends(get_conn)):
     with tx(conn):
-        results = {op.id: _apply(conn, op) for op in body.ops}
+        ops = sorted(body.ops, key=lambda o: OP_ORDER.get(o.op, 9))
+        results = {op.id: _apply(conn, op) for op in ops}
     return {"results": results}
 
 
@@ -418,3 +486,25 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 @app.get("/")
 def index():
     return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
+
+
+def _shell() -> tuple[str, list[str]]:
+    """Version hash of the static files + the list the service worker precaches."""
+    files = sorted(p for p in STATIC.rglob("*") if p.is_file() and p.name != "sw.js")
+    h = hashlib.sha256()
+    for f in files:
+        h.update(f.relative_to(STATIC).as_posix().encode())
+        h.update(f.read_bytes())
+    urls = ["/"] + [f"/static/{f.relative_to(STATIC).as_posix()}" for f in files if f.name != "index.html"]
+    return h.hexdigest()[:12], urls
+
+
+@app.get("/sw.js")
+def service_worker():
+    # Served from the root so it controls the whole app. Its content changes with
+    # every deploy (the version), which is what makes phones pick up the new app.
+    version, urls = _shell()
+    body = (STATIC / "sw.js").read_text().replace("__VERSION__", version).replace(
+        "__SHELL__", json.dumps(urls))
+    return Response(body, media_type="application/javascript",
+                    headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})

@@ -1,11 +1,20 @@
 import * as nav from "../nav.js";
 import {
-  api, confirmDialog, flush, fmtDate, fmtDay, fmtKg, fmtSets, h, parseNum, pendingOps, queueDel, queuePut, sheet, toast, uuid,
+  api, confirmDialog, dropDraft, flush, getDraft, OfflineError, putDraft, queueFinish, fmtDate, fmtDay, fmtKg, fmtSets, h, parseNum, pendingOps, queueDel, queuePut, sheet, toast, uuid,
 } from "../lib.js";
 
 export async function renderWorkout(wid) {
-  const w = await api(`/api/workouts/${wid}`);
-  mergePending(w);
+  let w = null;
+  try { w = await api(`/api/workouts/${wid}`); } catch (e) { if (!getDraft(wid)) throw e; }
+  if (w && !w._offline) {
+    // Fresh from the server: it wins. Keep the phone's copy while it's open.
+    mergePending(w);
+    if (w.status === "open") putDraft(w); else dropDraft(wid);
+  } else {
+    // No connection: the phone's copy is the most up to date, if there is one.
+    w = getDraft(wid) || w;
+    mergePending(w);
+  }
   const root = h("div", { class: "stack", style: "gap:16px" });
 
   const header = h("section", { class: "card" },
@@ -19,7 +28,9 @@ export async function renderWorkout(wid) {
         "aria-pressed": String(w.is_deload),
         onclick: async () => {
           await flush();
-          await api(`/api/workouts/${wid}`, { method: "PATCH", body: { is_deload: !w.is_deload } });
+          try {
+            await api(`/api/workouts/${wid}`, { method: "PATCH", body: { is_deload: !w.is_deload } });
+          } catch (e) { toast(e.message); return; }
           rerender(wid);
         },
       }, w.is_deload ? "Descarga ✓" : "Normal")));
@@ -32,10 +43,10 @@ export async function renderWorkout(wid) {
   if (w.status === "open") {
     root.append(h("button", {
       class: "primary block", onclick: async () => {
-        const ok = await flush();
-        if (!ok) { toast("Sin conexión: lo apuntado está guardado en el móvil. Prueba de nuevo."); return; }
-        await api(`/api/workouts/${wid}`, { method: "PATCH", body: { status: "done" } });
-        toast("Entreno terminado 💪");
+        queueFinish(wid);
+        dropDraft(wid);
+        const sent = await flush();
+        toast(sent ? "Entreno terminado 💪" : "Entreno terminado 💪 Se enviará cuando haya conexión.");
         nav.replace("#/");
       },
     }, "Terminar entreno"));
@@ -52,7 +63,13 @@ export async function renderWorkout(wid) {
       });
       if (!ok) return;
       await flush();
-      await api(`/api/workouts/${wid}`, { method: "DELETE" });
+      try {
+        await api(`/api/workouts/${wid}`, { method: "DELETE" });
+      } catch (e) {
+        if (e instanceof OfflineError) { toast("Sin conexión: para eliminar necesitas internet."); return; }
+        throw e;
+      }
+      dropDraft(wid);
       nav.back("#/");
     },
   }, "Eliminar entreno"));
@@ -175,9 +192,18 @@ function exerciseCard(w, ex) {
 async function addExercise(w) {
   const { exercises } = await api("/api/routine");
   const inWorkout = new Set(w.exercises.map((e) => e.id));
-  const add = async (name, close) => {
-    const ex = await api("/api/exercises", { method: "POST", body: { name } });
-    await flush();
+  // Existing exercises can be added offline; a brand-new name needs the server.
+  const add = async (picked, close) => {
+    let ex = picked;
+    if (!ex.id) {
+      try { ex = await api("/api/exercises", { method: "POST", body: { name: picked.name } }); }
+      catch (e) { toast(e instanceof OfflineError ? "Sin conexión: elige uno de la lista; los nuevos necesitan internet." : e.message); return; }
+    }
+    const draft = getDraft(w.id);
+    if (draft && !draft.exercises.some((e) => e.id === ex.id)) {
+      draft.exercises.push({ id: ex.id, name: ex.name, target_sets: null, target_reps: null, sets: [], last: null, suggestion: null });
+      putDraft(draft);
+    }
     // One empty set so the exercise sticks to this workout.
     queuePut(uuid(), { workout_id: w.id, exercise_id: ex.id, position: 0, reps: null, weight_kg: null });
     await flush();
@@ -189,10 +215,16 @@ async function addExercise(w) {
     return [
       h("h2", {}, "Añadir ejercicio"),
       h("form", {
-        class: "row", onsubmit: (e) => { e.preventDefault(); if (input.value.trim()) add(input.value.trim(), close); },
+        class: "row", onsubmit: (e) => {
+          e.preventDefault();
+          const name = input.value.trim();
+          if (!name) return;
+          const known = exercises.find((x) => x.name.toLowerCase() === name.toLowerCase());
+          add(known || { name }, close);
+        },
       }, input, h("button", { class: "primary", type: "submit" }, "Añadir")),
       ...exercises.filter((e) => !inWorkout.has(e.id)).map((e) =>
-        h("button", { class: "block", onclick: () => add(e.name, close) }, e.name)),
+        h("button", { class: "block", onclick: () => add(e, close) }, e.name)),
     ];
   });
 }

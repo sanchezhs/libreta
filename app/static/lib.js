@@ -126,19 +126,42 @@ export const parseNum = (v) => {
 };
 
 // ---------- API ----------
+// fetch with a time limit: in a gym with one bar of signal a request can hang for
+// minutes, and the app must not freeze waiting for it.
+async function fetchT(url, opts = {}, ms = 8000) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), ms);
+  try { return await fetch(url, { ...opts, signal: ctl.signal }); }
+  finally { clearTimeout(t); }
+}
+
+export class OfflineError extends Error {}
+
+// True while the screen shows data the service worker kept from a previous visit.
+export let showingSaved = false;
+
 export async function api(path, { method = "GET", body, today = false } = {}) {
   const url = today ? `${path}${path.includes("?") ? "&" : "?"}today=${todayISO()}` : path;
-  const res = await fetch(url, {
-    method,
-    headers: body ? { "Content-Type": "application/json" } : {},
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  let res;
+  try {
+    res = await fetchT(url, {
+      method,
+      headers: body ? { "Content-Type": "application/json" } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch {
+    throw new OfflineError(method === "GET" ? "Sin conexión" : "Sin conexión: esto necesita internet. Inténtalo luego.");
+  }
+  if (method === "GET") { showingSaved = res.headers.get("X-Libreta-Offline") === "1"; setStatus(); }
+  if (res.status === 503 && res.headers.get("X-Libreta-Offline")) throw new OfflineError("Sin conexión y sin datos guardados de esta pantalla");
   if (!res.ok) {
     let msg = `Error ${res.status}`;
     try { const j = await res.json(); if (typeof j.detail === "string") msg = j.detail; } catch {}
     throw new Error(msg);
   }
-  return res.json();
+  const json = await res.json();
+  if (showingSaved && json && typeof json === "object" && !Array.isArray(json)) json._offline = true;
+  return json;
 }
 
 export const uuid = () =>
@@ -175,13 +198,73 @@ export function queuePut(id, data) {
   const q = loadQueue();
   q[id] = { op: "put", id, ts: nextTs(), data };
   saveQueue(q);
+  mirrorSet(id, data);
   scheduleFlush();
 }
 export function queueDel(id) {
   const q = loadQueue();
   q[id] = { op: "del", id, ts: nextTs() };
   saveQueue(q);
+  mirrorSet(id, null);
   scheduleFlush(0);
+}
+/** Create a workout (works offline: the server gets it with the next sync). */
+export function queueStart(wid, data) {
+  const q = loadQueue();
+  q[wid] = { op: "start", id: wid, ts: nextTs(), data };
+  saveQueue(q);
+}
+export function queueFinish(wid) {
+  const q = loadQueue();
+  q[`finish:${wid}`] = { op: "finish", id: `finish:${wid}`, ts: nextTs(), data: { workout_id: wid } };
+  saveQueue(q);
+}
+export const isQueued = (id) => id in loadQueue();
+
+// ---------- local copy of open workouts ----------
+// Every open workout is mirrored on the phone and kept up to date with each set,
+// so without a connection it is shown exactly as you left it (and one started
+// offline exists here before the server knows about it).
+const DKEY = "libreta.drafts.v1";
+const loadDrafts = () => { try { return JSON.parse(localStorage.getItem(DKEY) || "{}"); } catch { return {}; } };
+const saveDrafts = (d) => { try { localStorage.setItem(DKEY, JSON.stringify(d)); } catch {} };
+export const getDraft = (id) => loadDrafts()[id] || null;
+export const openDrafts = () => Object.values(loadDrafts()).filter((d) => !isQueued(`finish:${d.id}`));
+export function putDraft(w) {
+  const d = loadDrafts();
+  const { _offline, ...clean } = w;
+  d[w.id] = clean;
+  saveDrafts(d);
+}
+export function dropDraft(id) { const d = loadDrafts(); delete d[id]; saveDrafts(d); }
+
+function mirrorSet(setId, data) {
+  const drafts = loadDrafts();
+  let changed = false;
+  for (const w of Object.values(drafts)) {
+    for (const ex of w.exercises) {
+      const i = ex.sets.findIndex((s) => s.id === setId);
+      if (i >= 0) { if (data) Object.assign(ex.sets[i], data); else ex.sets.splice(i, 1); changed = true; }
+    }
+    if (data && w.id === data.workout_id && !w.exercises.some((ex) => ex.sets.some((s) => s.id === setId))) {
+      const ex = w.exercises.find((e) => e.id === data.exercise_id);
+      if (ex) { ex.sets.push({ id: setId, ...data }); ex.sets.sort((a, b) => a.position - b.position); changed = true; }
+    }
+  }
+  if (changed) saveDrafts(drafts);
+}
+
+// The plan (routine days + last session + deload suggestion) is kept on the phone
+// so a workout can be started with no signal at all.
+const PKEY = "libreta.plan.v1";
+export async function getPlan() {
+  try {
+    const p = await api("/api/plan", { today: true });
+    try { localStorage.setItem(PKEY, JSON.stringify(p)); } catch {}
+    return p;
+  } catch {
+    try { return JSON.parse(localStorage.getItem(PKEY)); } catch { return null; }
+  }
 }
 
 let debounce = null;
@@ -206,16 +289,18 @@ async function doFlush() {
   if (!ops.length) { setStatus(); return true; }
   setStatus("saving");
   try {
-    const res = await fetch("/api/sync", {
+    const res = await fetchT("/api/sync", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ops }), keepalive: true,
-    });
+      body: JSON.stringify({ ops }),
+    }, 6000);
     if (!res.ok) throw new Error(res.status);
     const q = loadQueue();
     for (const op of ops) if (q[op.id] && q[op.id].ts === op.ts) delete q[op.id];
     saveQueue(q);
     clearTimeout(retryTimer);
     if (Object.keys(q).length) return doFlush();
+    lastState = null;
+    if (showingSaved) reconnected();
     setStatus();
     return true;
   } catch {
@@ -232,12 +317,22 @@ function beacon() {
   navigator.sendBeacon("/api/sync", new Blob([JSON.stringify({ ops })], { type: "application/json" }));
 }
 
+// Back online after showing saved data: tell the app so it can reload the screen.
+function reconnected() {
+  showingSaved = false;
+  window.dispatchEvent(new Event("libreta:reconnected"));
+}
+
+let lastState = null;
 function setStatus(state) {
   const el = document.getElementById("sync");
   if (!el) return;
   const n = Object.keys(loadQueue()).length;
-  if (state === "error") { el.textContent = `Sin conexión · ${n} sin enviar (guardado en el móvil)`; el.className = "sync error"; }
-  else if (n || state === "saving") { el.textContent = "Guardando…"; el.className = "sync pending"; }
+  if (state) lastState = state;
+  else if (!n) lastState = null;
+  if (lastState === "error" && n) { el.textContent = `Sin conexión · ${n} sin enviar (a salvo en el móvil)`; el.className = "sync error"; }
+  else if (n) { el.textContent = "Guardando…"; el.className = "sync pending"; }
+  else if (showingSaved) { el.textContent = "Sin conexión · datos guardados"; el.className = "sync pending"; }
   else { el.textContent = "Guardado ✓"; el.className = "sync"; }
 }
 
@@ -248,7 +343,7 @@ export function initQueue() {
   });
   window.addEventListener("pagehide", beacon);
   window.addEventListener("pageshow", () => flush());
-  window.addEventListener("online", () => flush());
+  window.addEventListener("online", () => flush().then((ok) => { if (ok && showingSaved) reconnected(); }));
   setStatus();
   flush();
 }

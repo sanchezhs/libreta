@@ -1,4 +1,4 @@
-import { flush, h, initQueue } from "./lib.js";
+import { flush, h, initQueue, toast } from "./lib.js";
 import * as nav from "./nav.js";
 import { renderHome } from "./views/home.js";
 import { renderWorkout } from "./views/workout.js";
@@ -47,8 +47,9 @@ async function route() {
     if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   });
   topbar(info, parent);
-  // Send pending sets first so the next screen reads fresh data.
-  await flush();
+  // Send pending changes first so the next screen reads fresh data, but never
+  // keep the screen waiting on a bad connection: what's queued is shown anyway.
+  await Promise.race([flush(), new Promise((r) => setTimeout(r, 2000))]);
   try {
     const nodes = await render(hash.match(re));
     view.replaceChildren(...[nodes].flat());
@@ -61,6 +62,22 @@ async function route() {
 }
 
 nav.setRenderer(route);
+
+// When the connection comes back, swap saved data for fresh data, unless you are
+// typing in a field right now (re-rendering would steal the focus).
+window.addEventListener("libreta:reconnected", () => {
+  if (!document.activeElement?.matches("input, select, textarea")) nav.refresh();
+});
+
+// Any action that fails (typically: no connection) says so instead of doing nothing.
+window.addEventListener("unhandledrejection", (e) => {
+  toast(e.reason?.message || "Algo ha fallado");
+});
+
+// Offline support. Service workers only run on https:// or localhost.
+if ("serviceWorker" in navigator && window.isSecureContext) {
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+}
 window.addEventListener("hashchange", route);
 initQueue();
 route();
