@@ -18,7 +18,7 @@ const save = () => { try { sessionStorage.setItem(KEY, JSON.stringify({ stack, s
 
 const LABELS = [
   [/^#\/w\//, "Entreno"], [/^#\/progreso/, "Progreso"], [/^#\/historial/, "Historial"],
-  [/^#\/ejercicio\//, "Ejercicio"], [/^#\/rutina/, "Rutina"], [/^#?\/?$/, "Inicio"],
+  [/^#\/ejercicio\//, "Ejercicio"], [/^#\/rutina/, "Rutina"], [/^#\/ajustes/, "Ajustes"], [/^#?\/?$/, "Inicio"],
 ];
 export const labelOf = (hash) => (LABELS.find(([re]) => re.test(hash || "#/")) || [null, "Atrás"])[1];
 

@@ -3,7 +3,7 @@ import * as nav from "./nav.js";
 import { renderHome } from "./views/home.js";
 import { renderWorkout } from "./views/workout.js";
 import { renderHistory, renderExercise } from "./views/history.js";
-import { renderRoutine } from "./views/routine.js";
+import { renderRoutine, renderSettings } from "./views/routine.js";
 import { renderProgress } from "./views/progress.js";
 
 // [pattern, active tab, render, parent screen for "back" when there is no history]
@@ -15,6 +15,7 @@ const routes = [
   [/^#\/historial$/, "historial", () => renderHistory(), null],
   [/^#\/ejercicio\/(\d+)$/, "historial", (m) => renderExercise(Number(m[1])), "#/historial"],
   [/^#\/rutina$/, "rutina", () => renderRoutine(), null],
+  [/^#\/ajustes$/, "rutina", () => renderSettings(), "#/rutina"],
 ];
 
 let current = null;  // { parent }
