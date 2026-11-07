@@ -1,4 +1,4 @@
-import { api, fmtDate, fmtKg, fmtSet, fmtSets, h } from "../lib.js";
+import { api, fmtDate, fmtKg, fmtSet, fmtSets, h, todayISO } from "../lib.js";
 import { lineChart, toT } from "../charts.js";
 
 export async function renderHistory() {
@@ -16,15 +16,37 @@ export async function renderHistory() {
     out.push(h("p", { class: "empty" }, "Aún no hay entrenos."));
     return out;
   }
-  out.push(h("section", { class: "card" },
-    h("h3", {}, "Entrenos"),
-    h("div", { class: "list" }, workouts.map((w) => h("a", { href: `#/w/${w.id}` },
-      h("div", {},
-        h("div", {}, w.name, w.is_deload ? h("span", { class: "chip deload", style: "margin-left:6px" }, "Descarga") : null),
-        h("div", { class: "muted small" }, `${w.n_exercises} ejercicios · ${w.n_sets} series`, w.status === "open" ? " · en curso" : "")),
-      h("span", { class: "muted small" }, fmtDate(w.date)))))));
+  // Grouped by week (Monday first); a deload week says so once, in its header.
+  const weeks = new Map();
+  for (const w of workouts) {
+    const ws = mondayOf(w.date);
+    if (!weeks.has(ws)) weeks.set(ws, []);
+    weeks.get(ws).push(w);
+  }
+  const thisWeek = mondayOf(todayISO());
+  const lastWeek = mondayOf(isoAdd(thisWeek, -7));
+  for (const [ws, list] of weeks) {
+    const title = ws === thisWeek ? "Esta semana" : ws === lastWeek ? "Semana pasada"
+      : `Semana del ${fmtDate(ws, { day: "numeric", month: "short" })}`;
+    const sets = list.reduce((a, w) => a + w.n_sets, 0);
+    out.push(h("section", { class: "card week-group" },
+      h("div", { class: "row between" },
+        h("h3", {}, title, list.some((w) => w.is_deload) ? h("span", { class: "chip deload", style: "margin-left:8px" }, "Descarga") : null),
+        h("span", { class: "muted small" }, `${plural(list.length, "entreno", "entrenos")} · ${plural(sets, "serie", "series")}`)),
+      h("div", { class: "list" }, list.map((w) => h("a", { href: `#/w/${w.id}` },
+        h("div", {},
+          h("div", {}, w.name),
+          h("div", { class: "muted small" }, `${plural(w.n_exercises, "ejercicio", "ejercicios")} · ${plural(w.n_sets, "serie", "series")}`,
+            w.status === "open" ? h("span", { class: "open-tag" }, " · en curso") : null)),
+        h("span", { class: "muted small", style: "white-space:nowrap" }, fmtDate(w.date, { weekday: "short", day: "numeric" })))))));
+  }
   return out;
 }
+
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+const isoAdd = (iso, days) => { const d = new Date(toT(iso)); d.setDate(d.getDate() + days); return localISO(d); };  // calendar days: safe across DST
+const localISO = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+function mondayOf(iso) { const d = new Date(toT(iso)); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return localISO(d); }
 
 export async function renderExercise(id) {
   const data = await api(`/api/exercises/${id}/history`);

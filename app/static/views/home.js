@@ -1,4 +1,5 @@
 import * as nav from "../nav.js";
+import { toT } from "../charts.js";
 import { api, fmtDate, fmtKg, fmtSet, dropDraft, getPlan, h, isQueued, openDrafts, putDraft, queueStart, sheet, sparkline, toast, todayISO, uuid } from "../lib.js";
 
 const LETTERS = ["L", "M", "X", "J", "V", "S", "D"];
@@ -140,21 +141,36 @@ function deloadCard(data) {
           "Haz la mitad de series con el peso de siempre y quédate lejos del fallo. Cada ejercicio te sugiere qué hacer.")),
       h("div", {}, h("button", { class: "ghost", style: "padding:0", onclick: () => toggle(false) }, "Posponer a la semana que viene")));
   }
-  const w = dl.weeks_until;
-  return h("section", { class: "row between", style: "padding:0 4px" },
-    h("span", { class: "muted small" }, w === 1 ? "Descarga la semana que viene" : `Descarga en ${w} semanas`),
-    h("button", { class: "ghost small", onclick: () => toggle(true) }, "Descargar esta semana"));
+  return null;  // not a deload week: the next one is shown at the foot of "Esta semana"
+}
+
+function nextDeloadRow(data) {
+  const dl = data.deload;
+  if (dl.every < 2 || dl.this_week || dl.weeks_until == null) return null;
+  const ws = new Date(toT(data.week_start));
+  ws.setDate(ws.getDate() + dl.weeks_until * 7);  // calendar days: safe across DST
+  const when = dl.weeks_until === 1 ? "la semana que viene"
+    : ws.toLocaleDateString("es-ES", { day: "numeric", month: "short" });
+  return h("div", { class: "week-foot" },
+    h("span", {}, "Próxima descarga: ", h("strong", {}, when)),
+    h("button", {
+      class: "ghost small", onclick: async () => {
+        await api(`/api/deload/${data.week_start}`, { method: "PUT", body: { on: true }, today: true });
+        renderHomeAgain();
+      },
+    }, "Adelantar"));
 }
 
 function weekCard(data) {
   const cells = data.strip.map((d, i) => {
     const isToday = d.date === data.today;
     const names = d.workouts.length ? d.workouts.map((w) => w.name) : d.scheduled.map((s) => s.name);
-    return h("button", {
-      class: `day ${d.status}${isToday ? " is-today" : ""}`,
-      "aria-label": `${d.label}: ${STATUS_TEXT[d.status]}${names.length ? " · " + names.join(", ") : ""}`,
-      onclick: () => dayMenu(d, data),
-    }, h("span", {}, LETTERS[i]), h("span", { class: "dot" }));
+    const label = `${d.label}: ${STATUS_TEXT[d.status]}${names.length ? " · " + names.join(", ") : ""}`;
+    const actionable = d.workouts.length || d.status === "rest" || (d.scheduled.length && d.status !== "moved");
+    const content = [h("span", {}, LETTERS[i]), h("span", { class: "dot" })];
+    return actionable
+      ? h("button", { class: `day ${d.status}${isToday ? " is-today" : ""}`, "aria-label": label, onclick: () => dayMenu(d, data) }, ...content)
+      : h("div", { class: `day ${d.status}${isToday ? " is-today" : ""}`, role: "img", "aria-label": label }, ...content);
   });
   return h("section", { class: "card" },
     h("h3", {}, "Esta semana"),
@@ -163,7 +179,8 @@ function weekCard(data) {
       h("span", {}, h("i", { style: "background:var(--good);border-color:var(--good)" }), "hecho"),
       h("span", {}, h("i", { style: "border-color:var(--accent)" }), "programado"),
       h("span", {}, h("i", { style: "border-color:var(--bad)" }), "no hecho"),
-      h("span", {}, h("i", { style: "border-color:var(--muted);border-style:dashed" }), "descanso")));
+      h("span", {}, h("i", { style: "border-color:var(--muted);border-style:dashed" }), "descanso")),
+    nextDeloadRow(data));
 }
 
 function dayMenu(d, data) {
@@ -195,16 +212,17 @@ function progressCard(data) {
       delta = h("span", { class: `delta ${cls}`, title: `vs. ${p.delta_since}` },
         `${arrow} ${fmtKg(Math.abs(p.delta))}${unit}`);
     }
+    // [ name ..................... ↑ 12,5 kg ]
+    // [ 8×52,5 kg            ~~~sparkline~~~ ]
     return h("a", { class: "prog", href: `#/progreso/${p.exercise_id}` },
-      h("div", {},
-        h("div", { class: "name" }, p.name),
-        h("div", { class: "muted small num" }, last ? `Mejor última: ${fmtSet(last.best)}${last.best.weight_kg ? " kg" : " reps"}` : "Sin datos aún")),
-      sparkline(p.points),
-      delta);
+      h("span", { class: "name" }, p.name),
+      delta,
+      h("span", { class: "muted small num" }, last ? `${fmtSet(last.best)}${last.best.weight_kg ? " kg" : " reps"}` : "Sin datos aún"),
+      sparkline(p.points, 96, 24));
   });
   return h("section", { class: "card" },
     h("div", {},
       h("h3", {}, "Progresión"),
-      h("p", { class: "muted small", style: "margin:2px 0 0" }, "1RM estimado de tu mejor serie; cambio en ~4 semanas. Sin semanas de descarga.")),
+      h("p", { class: "muted small", style: "margin:2px 0 0" }, "Mejor serie de la última sesión y cambio del 1RM estimado en ~4 semanas (sin descargas).")),
     rows.length ? h("div", {}, rows) : h("p", { class: "empty" }, "Añade ejercicios a tu rutina."));
 }

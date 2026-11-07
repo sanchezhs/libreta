@@ -24,8 +24,8 @@ export async function renderWorkout(wid) {
         h("div", { class: "muted small" }, fmtDate(w.date, { weekday: "long", day: "numeric", month: "long" }),
           w.status === "done" ? " · terminado" : "")),
       h("button", {
-        class: `chip${w.is_deload ? " deload" : ""}`, style: "min-height:36px;border:0",
-        "aria-pressed": String(w.is_deload),
+        class: `switch${w.is_deload ? " on" : ""}`, role: "switch", "aria-checked": String(w.is_deload),
+        title: "Marca esta sesión como de descarga: verás menos series sugeridas y no cuenta para la progresión",
         onclick: async () => {
           await flush();
           try {
@@ -33,7 +33,7 @@ export async function renderWorkout(wid) {
           } catch (e) { toast(e.message); return; }
           rerender(wid);
         },
-      }, w.is_deload ? "Descarga ✓" : "Normal")));
+      }, h("span", { class: "switch-label" }, "Descarga"), h("span", { class: "switch-track", "aria-hidden": "true" }, h("span", { class: "switch-thumb" })))));
   root.append(header);
 
   for (const ex of w.exercises) root.append(exerciseCard(w, ex));
@@ -50,8 +50,6 @@ export async function renderWorkout(wid) {
         nav.replace("#/");
       },
     }, "Terminar entreno"));
-  } else {
-    root.append(h("button", { class: "block", onclick: () => nav.back("#/historial") }, "Volver"));
   }
   root.append(h("button", {
     class: "ghost danger block", onclick: async () => {
@@ -78,6 +76,8 @@ export async function renderWorkout(wid) {
 
 function rerender() { nav.refresh(); }
 
+const unit = (sets) => (sets.some((s) => s.weight_kg) ? " kg" : " reps");
+
 // Apply changes still waiting in the save queue (e.g. the page was reloaded offline).
 function mergePending(w) {
   for (const op of pendingOps()) {
@@ -99,21 +99,21 @@ function exerciseCard(w, ex) {
   const list = h("div", { class: "sets" });
   const card = h("section", { class: "card" });
 
+  const target = ex.target_sets && ex.target_reps ? `${ex.target_sets} × ${ex.target_reps}`
+    : ex.target_sets ? `${ex.target_sets} series` : ex.target_reps ? `${ex.target_reps} reps` : null;
   const head = h("div", { class: "ex-head" },
     h("a", { href: `#/ejercicio/${ex.id}` }, ex.name),
-    ex.target_sets || ex.target_reps
-      ? h("span", { class: "muted small" }, [ex.target_sets && `${ex.target_sets} series`, ex.target_reps && `${ex.target_reps} reps`].filter(Boolean).join(" · "))
-      : null);
+    target ? h("div", { class: "muted small" }, `Objetivo ${target}`) : null);
   card.append(head);
 
   if (ex.suggestion && ex.suggestion.sets.length) {
     card.append(h("div", { class: "hint deload" },
-      h("strong", {}, "Descarga: "), fmtSets(ex.suggestion.sets), " kg",
-      h("div", { class: "small" }, `Mitad de series de tu sesión del ${fmtDay(ex.suggestion.from_date)}; deja ${ex.suggestion.rir} reps en recámara.`)));
+      h("strong", {}, "Descarga: "), h("span", { class: "num" }, fmtSets(ex.suggestion.sets), unit(ex.suggestion.sets)),
+      h("div", { class: "small" }, `Menos series que el ${fmtDay(ex.suggestion.from_date)}, último entreno normal. Deja ${ex.suggestion.rir} reps en recámara.`)));
   } else if (ex.last) {
     card.append(h("div", { class: "hint" },
       h("span", { class: "muted" }, `Última vez (${fmtDay(ex.last.date)}): `),
-      h("span", { class: "num" }, fmtSets(ex.last.sets))));
+      h("span", { class: "num" }, fmtSets(ex.last.sets), unit(ex.last.sets))));
   }
 
   const labels = h("div", { class: "set-labels" }, h("span"), h("span", {}, "reps"), h("span", { class: "x" }, "×"), h("span", {}, "kg"), h("span"));
@@ -151,7 +151,7 @@ function exerciseCard(w, ex) {
       h("span", { class: "n" }),
       reps, h("span", { class: "x" }, "×"), kg,
       h("button", {
-        class: "icon ghost", "aria-label": "Borrar serie",
+        class: "icon ghost set-del", "aria-label": "Borrar serie",
         onclick: () => {
           queueDel(s.id);
           ex.sets = ex.sets.filter((x) => x !== s);
