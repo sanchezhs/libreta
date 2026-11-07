@@ -40,7 +40,6 @@ function dayEditor(day) {
 
   const drawExercises = () => {
     exList.replaceChildren(...[
-      state.exercises.length ? h("div", { class: "ex-edit muted small" }, h("span", {}, "Ejercicio"), h("span", {}, "Series"), h("span", {}, "Reps"), h("span")) : null,
       ...state.exercises.map((e, i) => {
         const n = h("input", { value: e.name, list: "ex-names", "aria-label": "Ejercicio" });
         const sets = h("input", { value: e.target_sets ?? "", inputmode: "numeric", placeholder: "–", "aria-label": "Series objetivo" });
@@ -54,11 +53,18 @@ function dayEditor(day) {
           [state.exercises[i], state.exercises[j]] = [state.exercises[j], state.exercises[i]];
           markDirty(); drawExercises();
         };
-        return h("div", { class: "ex-edit" }, n, sets, reps,
-          h("div", { class: "moves" },
-            h("button", { class: "ghost", "aria-label": "Subir", onclick: () => move(-1) }, "↑"),
-            h("button", { class: "ghost", "aria-label": "Bajar", onclick: () => move(1) }, "↓"),
-            h("button", { class: "ghost danger", "aria-label": "Quitar", onclick: () => { state.exercises.splice(i, 1); markDirty(); drawExercises(); } }, "✕")));
+        // Two rows so the name gets the full width on a phone:
+        // [ name ................ ✕ ]
+        // [ series [_] reps [__]  ↑ ↓ ]
+        return h("div", { class: "ex-edit" },
+          h("div", { class: "ex-name" }, n,
+            h("button", { class: "ghost danger icon", "aria-label": `Quitar ${e.name}`, onclick: () => { state.exercises.splice(i, 1); markDirty(); drawExercises(); } }, "✕")),
+          h("div", { class: "ex-meta" },
+            h("label", {}, "series", sets),
+            h("label", {}, "reps", reps),
+            h("div", { class: "moves" },
+              h("button", { class: "ghost", "aria-label": `Subir ${e.name}`, disabled: i === 0, onclick: () => move(-1) }, "↑"),
+              h("button", { class: "ghost", "aria-label": `Bajar ${e.name}`, disabled: i === state.exercises.length - 1, onclick: () => move(1) }, "↓"))));
       })].filter(Boolean));
   };
   drawExercises();

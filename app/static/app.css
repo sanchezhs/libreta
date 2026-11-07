@@ -195,11 +195,16 @@ svg.spark circle { fill: var(--accent); stroke: var(--surface); stroke-width: 2;
 .chart-tip { min-height: 1.4em; font-size: .9rem; color: var(--text-2); }
 
 /* routine editor */
-.ex-edit { display: grid; grid-template-columns: minmax(0, 1fr) 64px 72px 108px; gap: 6px; align-items: center; }
-.ex-edit.muted span:nth-child(2), .ex-edit.muted span:nth-child(3) { text-align: center; }
-.ex-edit input { padding: 0 8px; }
-.ex-edit .moves { display: flex; }
-.ex-edit .moves button { min-width: 36px; padding: 0; }
+.ex-edit { display: grid; gap: 6px; padding: 10px 0; border-top: 1px solid var(--border); }
+.ex-edit:first-child { border-top: 0; padding-top: 0; }
+.ex-name { display: flex; align-items: center; gap: 4px; }
+.ex-name input { flex: 1; min-width: 0; }
+.ex-meta { display: flex; align-items: center; gap: 12px; }
+.ex-meta label { display: flex; align-items: center; gap: 6px; font-size: .85rem; color: var(--muted); }
+.ex-meta input { width: 56px; min-height: 40px; padding: 0 6px; text-align: center; }
+.ex-meta label + label input { width: 72px; }
+.ex-meta .moves { display: flex; margin-left: auto; }
+.ex-meta .moves button { min-width: 44px; min-height: 40px; padding: 0; }
 
 /* sheet */
 .sheet { position: fixed; inset: 0; z-index: 20; background: rgb(0 0 0 / .4); display: flex; align-items: flex-end; }
@@ -216,8 +221,9 @@ svg.spark circle { fill: var(--accent); stroke: var(--surface); stroke-width: 2;
 .row > input { flex: 1 1 140px; width: auto; }
 
 /* segmented control */
-.seg { display: flex; gap: 4px; padding: 4px; background: var(--surface-2); border-radius: 12px; overflow-x: auto; }
-.seg button { flex: 1 0 auto; min-height: 40px; padding: 0 12px; border: 0; background: transparent; color: var(--text-2); border-radius: 9px; font-size: .9rem; }
+.seg { display: flex; gap: 2px; padding: 4px; background: var(--surface-2); border-radius: 12px; }
+.seg button { flex: 1 1 0; min-width: 0; min-height: 40px; padding: 4px 4px; border: 0; background: transparent; color: var(--text-2);
+  border-radius: 9px; font-size: .85rem; line-height: 1.15; white-space: normal; text-align: center; }
 .seg button.on { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: 0 1px 2px rgb(0 0 0 / .12); }
 .seg.small button { min-height: 36px; font-size: .85rem; }
 .chip.toggle { min-height: 36px; padding: 0 12px; border: 1px solid var(--border); background: var(--surface); }
